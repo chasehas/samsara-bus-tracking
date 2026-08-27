@@ -1,7 +1,5 @@
 # Samsara School Bus Geofence Alerts 🚌
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
-
 A lightweight automation that restores real-time proximity alerts for school buses using public Samsara Fleet Viewer links.
 
 Delivers instant push notifications to your mobile phone via **[ntfy.sh](https://ntfy.sh)** (free, zero subscriptions, works on iOS and Android) as the bus approaches your stop.
@@ -16,34 +14,45 @@ Delivers instant push notifications to your mobile phone via **[ntfy.sh](https:/
   - **2. Neighborhood Entrance**: Alerts when the bus enters your subdivision (e.g. 1–2 mins away).
   - **3. Street Entrance**: Urgent walk-outside alert when the bus turns onto your street.
 - **Separate AM & PM Route Profiles**: Automatically applies different checkpoint sequences and time windows for morning pickup vs. afternoon dropoff.
-- **Timezone-Aware Scheduling**: Works cleanly on cloud servers running UTC by anchoring active windows to your local school timezone (`America/New_York`).
+- **Timezone-Aware Scheduling**: Evaluates active windows according to your local school timezone (`America/New_York`).
 - **Vehicle Filtering**: Filter by bus name (`"target_device_name": "1710"`) to avoid conflicts when multiple buses share a viewer token.
 - **Resilient & Persisted**: Confirms notification delivery before marking checkpoints fired; remembers state across restarts.
 - **Instant Mobile Push Alerts**: Delivers notifications via **[ntfy.sh](https://ntfy.sh)** with custom sounds, emojis, and click-through map links.
 
 ---
 
-## 🚀 Cloud Deployment Options
+## Quick Start (Local Run)
 
-### Option A: Render (Free Web Service)
-1. Install the free **ntfy** app on your phone ([iOS](https://apps.apple.com/app/ntfy/id1625396347) / [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy)).
-2. Pick a private topic name (e.g., `myfamily-bus-alert-74921`) and subscribe in the app.
-3. Click the **Deploy to Render** button below:
+### 1. Prerequisites
+- Python 3.10+ installed
+- The free **ntfy** app installed on your phone ([iOS](https://apps.apple.com/app/ntfy/id1625396347) / [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy))
 
-   [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
-
-4. In the Render dashboard, set the `CONFIG_JSON` environment variable with your JSON settings.
-5. **Keep-Alive Note**: Render's free web tier spins down after 15 minutes of zero HTTP traffic. To ensure 24/7 uptime during school hours without paying, set up a free 5-minute monitor on **[UptimeRobot](https://uptimerobot.com)** pointing to your service's `/health` URL (e.g. `https://your-service.onrender.com/health`).
-
-### Option B: Local / Docker / Home Server
+### 2. Clone & Install
 ```bash
 git clone https://github.com/your-username/samsara-bus-tracking.git
 cd samsara-bus-tracking
 pip install -r requirements.txt
+```
+
+### 3. Configure
+Copy `config.example.json` to `config.json`:
+```bash
+cp config.example.json config.json
+```
+
+Edit `config.json` with your:
+1. `samsara_token` (the token from your district's Samsara viewer link: `https://cloud.samsara.com/fleet/viewer/<TOKEN>`)
+2. `ntfy.topic` (your chosen private topic subscribed in the ntfy app)
+3. Coordinates for your approach, subdivision, and street checkpoints.
+
+### 4. Run
+
+**PowerShell / Terminal**:
+```bash
 python main.py --config config.json
 ```
 
-Or via Docker:
+**Docker Compose**:
 ```bash
 docker-compose up -d
 ```
