@@ -4,7 +4,7 @@ School Bus Live Tracker & Geofence Alert Service
 Periodically polls Samsara Fleet Viewer for school bus coordinates,
 evaluates staged geofencing checkpoints (e.g. Approach -> Subdivision -> Street),
 dispatches instant push notifications via ntfy.sh to mobile devices,
-and serves a lightweight health check / status web server for cloud platforms (Render, Fly.io).
+and serves a minimal, unauthenticated /health check for cloud platforms.
 
 Supports configuration via:
 1. config.json file (default)
@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from typing import Dict, List, Optional, Set
+from zoneinfo import ZoneInfo
 
 if sys.platform == "win32":
     try:
@@ -52,93 +53,84 @@ def format_timestamp(ms: int) -> str:
     return dt.isoformat()
 
 
-class HealthDashboardHandler(BaseHTTPRequestHandler):
-    """Serves /health and / status dashboard for cloud platforms (Render, Fly.io)."""
+def format_speed(speed: Optional[float]) -> str:
+    if isinstance(speed, (int, float)):
+        return f"{speed:.1f}mph"
+    return "N/A"
+
+
+def format_heading(heading: Optional[float]) -> str:
+    if isinstance(heading, (int, float)):
+        return f"{heading:.0f}°"
+    return "N/A"
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """
+    Minimal health check handler.
+    Returns strictly generic status (no tokens, no coordinates, no addresses).
+    """
     service_ref: Optional["BusAlertService"] = None
 
     def do_GET(self):
         service = self.service_ref
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = datetime.now(timezone.utc).isoformat()
 
-        if self.path in ("/health", "/ping"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "time": now_str}).encode("utf-8"))
-            return
+        # Check if service is healthy
+        is_healthy = True
+        error_msg = None
 
-        # Status dashboard HTML
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        if service:
+            active_p = service.get_active_profile()
+            # If in active window and hasn't polled successfully in > 5 minutes, report degraded
+            if active_p and service.last_poll_success_ts > 0:
+                elapsed = time.time() - service.last_poll_success_ts
+                if elapsed > 300:
+                    is_healthy = False
+                    error_msg = f"Polling stalled (last success {int(elapsed)}s ago)"
+
+        status_code = 200 if is_healthy else 503
+        response_data = {
+            "status": "healthy" if is_healthy else "degraded",
+            "service": "school-bus-tracker",
+            "timestamp": now_iso,
+        }
+        if error_msg:
+            response_data["error"] = error_msg
+
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
         self.end_headers()
-
-        active_p = service.get_active_profile() if service else None
-        active_name = active_p.name if active_p else "Idle (Outside Active Windows)"
-        last_loc = service.last_telemetry if service else {}
-        token = service.token if service else ""
-
-        html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>School Bus Tracker 🚌</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="15">
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }}
-        .card {{ max-width: 600px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }}
-        h1 {{ margin-top: 0; display: flex; align-items: center; gap: 8px; font-size: 24px; }}
-        .badge {{ display: inline-block; padding: 4px 12px; border-radius: 9999px; font-size: 13px; font-weight: 600; background: #10b981; color: #022c22; }}
-        .stat {{ margin: 16px 0; padding: 12px; background: #334155; border-radius: 8px; }}
-        .label {{ font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }}
-        .value {{ font-size: 16px; font-weight: 500; margin-top: 4px; }}
-        .checkpoints {{ margin-top: 16px; }}
-        .cp {{ padding: 8px 12px; margin-bottom: 6px; background: #0f172a; border-radius: 6px; display: flex; justify-content: space-between; }}
-        .cp.fired {{ border-left: 4px solid #10b981; }}
-        .btn {{ display: inline-block; padding: 10px 18px; background: #3b82f6; color: #fff; text-decoration: none; border-radius: 8px; font-weight: 500; margin-top: 16px; text-align: center; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>School Bus Tracker 🚌 <span class="badge">Online</span></h1>
-        <div class="stat">
-            <div class="label">Current Status</div>
-            <div class="value">{active_name}</div>
-        </div>
-        <div class="stat">
-            <div class="label">Last Known Bus Position</div>
-            <div class="value">{last_loc.get('formatted', 'Awaiting first update')}</div>
-            <div style="font-size: 13px; color: #94a3b8; margin-top: 4px;">
-                Speed: {last_loc.get('speed', 0):.1f} mph | Heading: {last_loc.get('heading', 0)}°
-            </div>
-        </div>
-        <a class="btn" href="https://cloud.samsara.com/fleet/viewer/{token}" target="_blank">Open Samsara Live Map ↗</a>
-    </div>
-</body>
-</html>"""
-        self.wfile.write(html.encode("utf-8"))
+        self.wfile.write(json.dumps(response_data).encode("utf-8"))
 
     def log_message(self, format, *args):
-        # Silence standard HTTP access logging to keep console clean
+        # Silence access logs to keep terminal clear
         return
 
 
 def start_health_server(service: "BusAlertService", port: int = 10000):
-    """Starts the embedded web server on a background daemon thread."""
-    HealthDashboardHandler.service_ref = service
+    """Starts the minimal health check server on a background daemon thread."""
+    HealthCheckHandler.service_ref = service
     try:
-        server = ThreadingHTTPServer(("0.0.0.0", port), HealthDashboardHandler)
+        server = ThreadingHTTPServer(("0.0.0.0", port), HealthCheckHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        logger.info(f"🌐 Health & Status Web Server listening on port {port} (http://0.0.0.0:{port})")
+        logger.info(f"🌐 Health server listening on port {port} (/health)")
     except Exception as e:
-        logger.warning(f"Could not start HTTP server on port {port}: {e}")
+        logger.warning(f"Could not start HTTP health server on port {port}: {e}")
 
 
 class BusAlertService:
     def __init__(self, config_dict: dict, log_dir: Optional[str] = None):
         self.config_dict = config_dict
         self.log_dir = log_dir or DEFAULT_LOG_DIR
-        self.last_telemetry: dict = {}
+        self.timezone_name = config_dict.get("timezone", "America/New_York")
+        self.target_device_name = config_dict.get("target_device_name") or os.getenv("TARGET_DEVICE_NAME")
+        if self.target_device_name:
+            self.target_device_name = str(self.target_device_name).strip()
+
+        self.last_poll_success_ts: float = 0.0
+        self.last_poll_error: Optional[str] = None
 
         # Safely attempt to initialize log directory
         try:
@@ -203,6 +195,7 @@ class BusAlertService:
                 triggers=triggers,
                 require_sequential=p_cfg.get("require_sequential", False),
                 cooldown_seconds=float(p_cfg.get("cooldown_seconds", 7200.0)),
+                timezone=p_cfg.get("timezone", self.timezone_name),
             )
             self.profiles.append(profile)
 
@@ -218,10 +211,9 @@ class BusAlertService:
         self.running = False
 
     def get_active_profile(self) -> Optional[RouteProfile]:
-        """Returns the currently time-active profile."""
-        now = datetime.now().time()
+        """Returns the currently active profile based on configured timezone."""
         for p in self.profiles:
-            if p.is_time_active(now):
+            if p.is_time_active():
                 return p
         return None
 
@@ -237,15 +229,6 @@ class BusAlertService:
             heading = loc.get("heading")
             speed = loc.get("speed")
             address = loc.get("formatted", "")
-
-            self.last_telemetry = {
-                "latitude": lat,
-                "longitude": lon,
-                "heading": heading,
-                "speed": speed,
-                "formatted": address,
-                "time_ms": time_ms,
-            }
 
             key = f"{dev_id}_{time_ms}_{lat}_{lon}"
             if key in self._seen_points:
@@ -272,8 +255,9 @@ class BusAlertService:
                 writer = csv.writer(f)
                 writer.writerow([
                     now_iso, dev_id, dev_name, time_ms, iso_time,
-                    lat, lon, heading,
-                    f"{speed:.2f}" if isinstance(speed, (int, float)) else speed,
+                    lat, lon,
+                    f"{heading:.0f}" if isinstance(heading, (int, float)) else "",
+                    f"{speed:.2f}" if isinstance(speed, (int, float)) else "",
                     address
                 ])
 
@@ -286,10 +270,21 @@ class BusAlertService:
         except Exception as e:
             logger.debug("Disk logging skipped due to error: %s", e)
 
-    def dispatch_alert(self, profile: RouteProfile, trigger: TriggerCheckpoint, device_name: str, dist_meters: float, formatted_address: str):
+    def dispatch_alert(
+        self,
+        profile: RouteProfile,
+        trigger: TriggerCheckpoint,
+        device_name: str,
+        dist_meters: float,
+        formatted_address: str,
+    ) -> bool:
+        """
+        Dispatches push notification via ntfy.
+        Returns True if delivery succeeded, False otherwise.
+        """
         if not self.notifier:
             logger.warning("No ntfy topic configured. Skipping notification dispatch.")
-            return
+            return False
 
         title = trigger.title or f"Bus Alert: {trigger.name} 🚌"
         custom_msg = trigger.message
@@ -300,7 +295,7 @@ class BusAlertService:
             msg = f"Bus {device_name} reached {trigger.name} ({dist_mi:.2f} mi away)!\nNear: {formatted_address}"
 
         click_url = f"https://cloud.samsara.com/fleet/viewer/{self.client.token}"
-        self.notifier.send_alert(
+        return self.notifier.send_alert(
             message=msg,
             title=title,
             priority=trigger.priority,
@@ -315,9 +310,19 @@ class BusAlertService:
             return
 
         devices = self.client.get_latest_locations(duration_ms=self.query_duration_ms)
+        self.last_poll_success_ts = time.time()
+        self.last_poll_error = None
+
         for dev in devices:
             dev_id = str(dev.get("id", ""))
-            dev_name = dev.get("name", "Bus")
+            dev_name = str(dev.get("name", "Bus"))
+
+            # Optional filter by target device name or ID
+            if self.target_device_name:
+                if dev_name != self.target_device_name and dev_id != self.target_device_name:
+                    logger.debug("Skipping non-target device '%s' (id: %s)", dev_name, dev_id)
+                    continue
+
             locations = dev.get("location", [])
 
             for loc in locations:
@@ -343,24 +348,33 @@ class BusAlertService:
                     timestamp_sec=ts_sec,
                 )
 
-                # Format status logging
+                # Format status logging safely
+                speed_str = format_speed(speed)
+                head_str = format_heading(heading)
                 cp_str = " | ".join([
                     f"{c['name'][:18]}: {'[FIRED]' if c['fired'] else (f'[{c['dist_m']}m*]' if c.get('is_active_target') else f'{c['dist_m']}m')}"
                     for c in status["checkpoints"]
                 ])
-                logger.info(f"[{active_profile.name} | Bus {dev_name}] Speed: {speed:.1f}mph | Head: {heading}° | {cp_str}")
+                logger.info(f"[{active_profile.name} | Bus {dev_name}] Speed: {speed_str} | Head: {head_str} | {cp_str}")
 
                 for trig, dist_m in fired_triggers:
                     logger.info(f"🚨 CHECKPOINT REACHED: '{trig.name}' ({dist_m:.0f}m)! DISPATCHING ALERT!")
-                    self.dispatch_alert(active_profile, trig, dev_name, dist_m, address)
+                    success = self.dispatch_alert(active_profile, trig, dev_name, dist_m, address)
+                    if success:
+                        trig.mark_fired(ts_sec)
+                        logger.info(f"✅ Alert for '{trig.name}' successfully delivered and marked fired.")
+                    else:
+                        logger.warning(f"⚠️ Delivery failed for '{trig.name}'. Will retry on next tick while in range.")
 
     def run(self):
         self.running = True
-        logger.info("Starting Bus Alert Service...")
+        logger.info(f"Starting Bus Alert Service (Timezone: {self.timezone_name})...")
+        if self.target_device_name:
+            logger.info(f"  Target Bus Filter: '{self.target_device_name}'")
         for p in self.profiles:
             w_str = f"[{p.window_start.strftime('%H:%M')} - {p.window_end.strftime('%H:%M')}]" if p.window_start else "[All Day]"
             seq_str = "Sequential" if p.require_sequential else "Independent"
-            logger.info(f"  Profile '{p.name}' {w_str} ({seq_str}):")
+            logger.info(f"  Profile '{p.name}' {w_str} ({seq_str}, TZ: {p.timezone}):")
             for t in p.triggers:
                 logger.info(f"    - {t.name}: ({t.lat:.6f}, {t.lon:.6f}) Radius: {t.radius_meters}m | MinSpeed: {t.min_speed_mph}mph | Priority: {t.priority}")
 
@@ -373,6 +387,7 @@ class BusAlertService:
             try:
                 self.tick()
             except Exception as e:
+                self.last_poll_error = str(e)
                 logger.error(f"Error during polling tick: {e}", exc_info=True)
 
             time.sleep(self.poll_interval)
@@ -397,7 +412,6 @@ def load_config(config_path_or_default: str = "config.json") -> dict:
     # 2. Check config file
     target_path = os.getenv("CONFIG_PATH", config_path_or_default)
     if not os.path.isabs(target_path):
-        # Check current working directory first, then script directory
         if not os.path.exists(target_path):
             script_relative = os.path.join(SCRIPT_DIR, target_path)
             if os.path.exists(script_relative):
@@ -414,6 +428,8 @@ def load_config(config_path_or_default: str = "config.json") -> dict:
         logger.info("Building configuration from individual environment variables.")
         return {
             "samsara_token": samsara_token,
+            "timezone": os.getenv("TIMEZONE", "America/New_York"),
+            "target_device_name": os.getenv("TARGET_DEVICE_NAME"),
             "poll_interval_sec": float(os.getenv("POLL_INTERVAL_SEC", "8.0")),
             "query_duration_ms": int(os.getenv("QUERY_DURATION_MS", "30000")),
             "profiles": [
@@ -452,7 +468,7 @@ def main():
     config = load_config(args.config)
     service = BusAlertService(config)
 
-    # Start lightweight health/status web server on background thread (for Render / Fly.io / Cloud healthchecks)
+    # Start minimal health check server on background thread (for Render / Fly.io / Cloud healthchecks)
     start_health_server(service, port=args.port)
 
     def handle_sig(sig, frame):

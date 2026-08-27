@@ -10,6 +10,7 @@ from datetime import datetime, time as dtime, timezone
 import logging
 import math
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("geofence")
 
@@ -51,18 +52,32 @@ class TriggerCheckpoint:
     fired: bool = False
     fired_time: Optional[float] = None
 
-    def evaluate(self, lat: float, lon: float, timestamp_sec: float, speed_mph: Optional[float] = None) -> Tuple[bool, float]:
-        """Returns (should_fire, distance_meters)."""
+    def evaluate(
+        self,
+        lat: float,
+        lon: float,
+        timestamp_sec: Optional[float] = None,
+        speed_mph: Optional[float] = None,
+    ) -> Tuple[bool, float]:
+        """
+        Returns (should_fire, distance_meters).
+        Does NOT mutate self.fired; caller must call mark_fired() upon confirmed delivery.
+        """
         dist = haversine_distance(lat, lon, self.lat, self.lon)
-        if not self.fired and dist <= self.radius_meters:
-            # If moving speed filter is enabled, check speed
-            if speed_mph is not None and speed_mph < self.min_speed_mph:
+        if self.fired or dist > self.radius_meters:
+            return False, dist
+
+        # Speed filter (filter stationary GPS drift)
+        if self.min_speed_mph > 0:
+            if speed_mph is None or speed_mph < self.min_speed_mph:
                 return False, dist
 
-            self.fired = True
-            self.fired_time = timestamp_sec
-            return True, dist
-        return False, dist
+        return True, dist
+
+    def mark_fired(self, timestamp_sec: Optional[float] = None):
+        """Marks the checkpoint as successfully fired."""
+        self.fired = True
+        self.fired_time = timestamp_sec or datetime.now(timezone.utc).timestamp()
 
     def reset(self):
         self.fired = False
@@ -77,12 +92,25 @@ class RouteProfile:
     triggers: List[TriggerCheckpoint] = field(default_factory=list)
     require_sequential: bool = True
     cooldown_seconds: float = 7200.0  # 2 hours
+    timezone: str = "America/New_York"
 
-    def is_time_active(self, current_local_time: Optional[dtime] = None) -> bool:
+    def is_time_active(self, current_dt: Optional[datetime] = None) -> bool:
+        """
+        Evaluates whether the profile is active according to the configured timezone.
+        """
         if self.window_start is None or self.window_end is None:
             return True
-        check_t = current_local_time or datetime.now().time()
-        return self.window_start <= check_t <= self.window_end
+
+        if current_dt is None:
+            try:
+                tz = ZoneInfo(self.timezone)
+                current_dt = datetime.now(tz)
+            except Exception as e:
+                logger.warning(f"Could not load timezone '{self.timezone}': {e}. Using local time.")
+                current_dt = datetime.now()
+
+        current_t = current_dt.time()
+        return self.window_start <= current_t <= self.window_end
 
     def check_cooldown_reset(self, now_ts: float):
         """Resets triggers if the cooldown period from the last alert has elapsed."""
@@ -103,7 +131,7 @@ class RouteProfile:
     ) -> Tuple[List[Tuple[TriggerCheckpoint, float]], Dict[str, Any]]:
         """
         Evaluates coordinates against checkpoints in this profile.
-        If require_sequential is True, checkpoints must fire in order (Stage 1 -> Stage 2 -> Stage 3).
+        Returns a list of (trigger, distance_m) that are ready to fire, and checkpoint statuses.
         """
         now_ts = timestamp_sec or datetime.now(timezone.utc).timestamp()
         self.check_cooldown_reset(now_ts)
@@ -142,16 +170,12 @@ class RouteProfile:
                     "dist_mi": round(dist_m / METERS_PER_MILE, 2),
                 })
 
-        status_dict = {
+        status_summary = {
             "profile": self.name,
             "checkpoints": checkpoint_statuses,
-            "heading": heading,
-            "speed": speed,
-            "total_fired": sum(1 for t in self.triggers if t.fired),
-            "total_checkpoints": len(self.triggers),
         }
-        return fired_now, status_dict
+        return fired_now, status_summary
 
     def reset(self):
-        for trig in self.triggers:
-            trig.reset()
+        for t in self.triggers:
+            t.reset()
