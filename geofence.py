@@ -176,6 +176,21 @@ class RouteProfile:
         }
         return fired_now, status_summary
 
+    def export_state(self) -> Dict[str, Optional[float]]:
+        """Exports checkpoint firing timestamps for persistence."""
+        return {t.name: t.fired_time for t in self.triggers if t.fired}
+
+    def import_state(self, state_dict: Dict[str, Optional[float]], now_ts: Optional[float] = None):
+        """Restores checkpoint state if within cooldown window."""
+        ts = now_ts or datetime.now(timezone.utc).timestamp()
+        for t in self.triggers:
+            if t.name in state_dict and state_dict[t.name] is not None:
+                fired_at = state_dict[t.name]
+                if (ts - fired_at) < self.cooldown_seconds:
+                    t.fired = True
+                    t.fired_time = fired_at
+                    logger.info(f"[{self.name}] Restored checkpoint '{t.name}' as already fired at {datetime.fromtimestamp(fired_at, tz=timezone.utc).isoformat()}")
+
     def reset(self):
         for t in self.triggers:
             t.reset()

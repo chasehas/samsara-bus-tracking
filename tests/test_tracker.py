@@ -5,6 +5,7 @@ Unit Tests for School Bus Tracker & Geofence Engine
 from datetime import datetime, time as dtime, timezone
 import json
 import pytest
+import time
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,7 @@ from geofence import (
 import main
 from main import (
     BusAlertService,
+    HealthCheckHandler,
     format_speed,
     format_heading,
     load_config,
@@ -24,7 +26,6 @@ from main import (
 
 
 def test_haversine_distance():
-    # San Francisco to San Jose approx 67km (67,000m)
     sf = (37.7749, -122.4194)
     sj = (37.3382, -121.8863)
     dist = haversine_distance(sf[0], sf[1], sj[0], sj[1])
@@ -61,7 +62,7 @@ def test_trigger_checkpoint_evaluation_and_decoupled_firing():
     # 4. Point in range, speed >= 3.0 mph -> returns should_fire=True BUT does NOT set cp.fired until mark_fired()
     should_fire, dist = cp.evaluate(target_lat, target_lon, timestamp_sec=1003.0, speed_mph=12.0)
     assert should_fire
-    assert not cp.fired  # Still False until confirmed delivery!
+    assert not cp.fired
 
     # 5. Confirm mark_fired
     cp.mark_fired(timestamp_sec=1003.0)
@@ -74,7 +75,6 @@ def test_trigger_checkpoint_evaluation_and_decoupled_firing():
 
 
 def test_route_profile_timezone_evaluation():
-    # Morning run: 06:45 - 08:30 in America/New_York
     profile = RouteProfile(
         name="Morning Run",
         window_start=dtime(6, 45),
@@ -84,11 +84,9 @@ def test_route_profile_timezone_evaluation():
 
     tz_ny = ZoneInfo("America/New_York")
     
-    # 07:15 AM EDT -> Active
     active_dt = datetime(2026, 8, 27, 7, 15, 0, tzinfo=tz_ny)
     assert profile.is_time_active(active_dt) is True
 
-    # 11:15 AM EDT (which is 15:15 UTC) -> Inactive
     inactive_dt = datetime(2026, 8, 27, 11, 15, 0, tzinfo=tz_ny)
     assert profile.is_time_active(inactive_dt) is False
 
@@ -98,21 +96,45 @@ def test_route_profile_sequential_gating():
     cp2 = TriggerCheckpoint("Stage 2", lat=33.5050, lon=-82.2400, radius_meters=100.0, min_speed_mph=0.0)
     profile = RouteProfile("Sequential Test", triggers=[cp1, cp2], require_sequential=True)
 
-    # Bus is at Stage 2 coordinates first, but Stage 1 hasn't fired yet -> Stage 2 must NOT fire
     fired, status = profile.evaluate_all_triggers(lat=33.5050, lon=-82.2400, speed=10.0)
     assert len(fired) == 0
 
-    # Now bus hits Stage 1
     fired, status = profile.evaluate_all_triggers(lat=33.5000, lon=-82.2400, speed=10.0)
     assert len(fired) == 1
     assert fired[0][0].name == "Stage 1"
-    # Mark Stage 1 fired
     cp1.mark_fired()
 
-    # Now bus hits Stage 2 -> Stage 2 fires
     fired, status = profile.evaluate_all_triggers(lat=33.5050, lon=-82.2400, speed=10.0)
     assert len(fired) == 1
     assert fired[0][0].name == "Stage 2"
+
+
+def test_state_export_and_import():
+    cp1 = TriggerCheckpoint("Stage 1", lat=33.5000, lon=-82.2400)
+    cp2 = TriggerCheckpoint("Stage 2", lat=33.5050, lon=-82.2400)
+    profile = RouteProfile("AM Run", triggers=[cp1, cp2], cooldown_seconds=7200.0)
+
+    now_t = 100000.0
+    cp1.mark_fired(timestamp_sec=now_t)
+
+    state = profile.export_state()
+    assert state == {"Stage 1": now_t}
+
+    # New profile instance restoring state
+    new_cp1 = TriggerCheckpoint("Stage 1", lat=33.5000, lon=-82.2400)
+    new_cp2 = TriggerCheckpoint("Stage 2", lat=33.5050, lon=-82.2400)
+    new_profile = RouteProfile("AM Run", triggers=[new_cp1, new_cp2], cooldown_seconds=7200.0)
+
+    # 1. Restore within cooldown (e.g. 5 minutes later)
+    new_profile.import_state(state, now_ts=now_t + 300)
+    assert new_cp1.fired is True
+    assert new_cp1.fired_time == now_t
+    assert new_cp2.fired is False
+
+    # 2. If restore happens after cooldown (e.g. 3 hours later), it stays unfired
+    new_cp1.reset()
+    new_profile.import_state(state, now_ts=now_t + 10800)
+    assert new_cp1.fired is False
 
 
 def test_formatting_helpers():
@@ -140,7 +162,6 @@ def test_device_filtering_in_service():
     service.client = MagicMock()
     service.client.token = "dummy-token"
     
-    # Return two buses: 9999 (wrong bus at stop) and 1710 (correct bus far away)
     service.client.get_latest_locations.return_value = [
         {
             "id": "1",
@@ -159,7 +180,6 @@ def test_device_filtering_in_service():
 
     service.tick()
 
-    # Alert should NOT have been sent for bus 9999
     assert service.notifier.send_alert.call_count == 0
 
 
@@ -188,13 +208,11 @@ def test_delivery_retry_behavior():
     ]
 
     service.notifier = MagicMock()
-    # 1. Delivery fails on first attempt
     service.notifier.send_alert.return_value = False
 
     service.tick()
-    assert service.profiles[0].triggers[0].fired is False  # Must not be marked fired!
+    assert service.profiles[0].triggers[0].fired is False
 
-    # 2. Delivery succeeds on second attempt
     service.notifier.send_alert.return_value = True
     service.tick()
     assert service.profiles[0].triggers[0].fired is True

@@ -1,5 +1,7 @@
 {
   "samsara_token": "YOUR_SAMSARA_VIEWER_TOKEN_HERE",
+  "timezone": "America/New_York",
+  "target_device_name": "1710",
   "poll_interval_sec": 8.0,
   "query_duration_ms": 30000,
   "home_stop": {

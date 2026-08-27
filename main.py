@@ -76,18 +76,25 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         service = self.service_ref
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Check if service is healthy
         is_healthy = True
         error_msg = None
 
         if service:
             active_p = service.get_active_profile()
-            # If in active window and hasn't polled successfully in > 5 minutes, report degraded
-            if active_p and service.last_poll_success_ts > 0:
-                elapsed = time.time() - service.last_poll_success_ts
-                if elapsed > 300:
-                    is_healthy = False
-                    error_msg = f"Polling stalled (last success {int(elapsed)}s ago)"
+            now_t = time.time()
+
+            # If inside active window, verify that polling is actively succeeding
+            if active_p:
+                if service.last_poll_success_ts == 0.0:
+                    # Never succeeded: give 120s grace period from startup before failing healthcheck
+                    if (now_t - service.start_time) > 120:
+                        is_healthy = False
+                        error_msg = "Never completed a successful polling cycle since service startup"
+                else:
+                    elapsed = now_t - service.last_poll_success_ts
+                    if elapsed > 300:
+                        is_healthy = False
+                        error_msg = f"Polling stalled (last success {int(elapsed)}s ago)"
 
         status_code = 200 if is_healthy else 503
         response_data = {
@@ -97,6 +104,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         }
         if error_msg:
             response_data["error"] = error_msg
+        elif service and service.last_poll_error:
+            # Include sanitized last error notice if present
+            response_data["notice"] = "Transient polling warning recorded"
 
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
@@ -124,11 +134,13 @@ class BusAlertService:
     def __init__(self, config_dict: dict, log_dir: Optional[str] = None):
         self.config_dict = config_dict
         self.log_dir = log_dir or DEFAULT_LOG_DIR
+        self.state_file = os.path.join(self.log_dir, ".service_state.json")
         self.timezone_name = config_dict.get("timezone", "America/New_York")
         self.target_device_name = config_dict.get("target_device_name") or os.getenv("TARGET_DEVICE_NAME")
         if self.target_device_name:
             self.target_device_name = str(self.target_device_name).strip()
 
+        self.start_time: float = time.time()
         self.last_poll_success_ts: float = 0.0
         self.last_poll_error: Optional[str] = None
 
@@ -199,6 +211,9 @@ class BusAlertService:
             )
             self.profiles.append(profile)
 
+        # Restore any persisted checkpoint state from previous runs/restarts
+        self.load_persisted_state()
+
         # ntfy Notifier
         ntfy_cfg = config_dict.get("ntfy", {})
         self.topic = ntfy_cfg.get("topic", "").strip()
@@ -209,6 +224,29 @@ class BusAlertService:
 
         self._seen_points: Set[str] = set()
         self.running = False
+
+    def load_persisted_state(self):
+        """Restores fired checkpoints from disk if present."""
+        if not os.path.exists(self.state_file):
+            return
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            now_ts = time.time()
+            for profile in self.profiles:
+                if profile.name in data:
+                    profile.import_state(data[profile.name], now_ts=now_ts)
+        except Exception as e:
+            logger.debug("Could not restore persisted state: %s", e)
+
+    def save_persisted_state(self):
+        """Saves current fired checkpoint timestamps to disk."""
+        try:
+            state_data = {profile.name: profile.export_state() for profile in self.profiles}
+            with open(self.state_file, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+        except Exception as e:
+            logger.debug("Could not save persisted state: %s", e)
 
     def get_active_profile(self) -> Optional[RouteProfile]:
         """Returns the currently active profile based on configured timezone."""
@@ -310,8 +348,13 @@ class BusAlertService:
             return
 
         devices = self.client.get_latest_locations(duration_ms=self.query_duration_ms)
-        self.last_poll_success_ts = time.time()
-        self.last_poll_error = None
+
+        # Warn if multiple devices exist without a target filter
+        if len(devices) > 1 and not self.target_device_name:
+            logger.warning(
+                f"⚠️ Multiple vehicles ({len(devices)}) returned in viewer, but no 'target_device_name' is set in config! "
+                "All vehicles will evaluate against the same profile. Consider setting 'target_device_name' to avoid vehicle conflicts."
+            )
 
         for dev in devices:
             dev_id = str(dev.get("id", ""))
@@ -362,9 +405,14 @@ class BusAlertService:
                     success = self.dispatch_alert(active_profile, trig, dev_name, dist_m, address)
                     if success:
                         trig.mark_fired(ts_sec)
+                        self.save_persisted_state()
                         logger.info(f"✅ Alert for '{trig.name}' successfully delivered and marked fired.")
                     else:
                         logger.warning(f"⚠️ Delivery failed for '{trig.name}'. Will retry on next tick while in range.")
+
+        # Update last successful poll timestamp at the end of a fully completed cycle
+        self.last_poll_success_ts = time.time()
+        self.last_poll_error = None
 
     def run(self):
         self.running = True

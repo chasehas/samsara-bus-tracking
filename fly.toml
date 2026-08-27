@@ -1,10 +1,18 @@
-app = "school-bus-tracker"
+app = "samsara-bus-tracker"
 primary_region = "iad"
 
 [build]
 
 [env]
   PYTHONUNBUFFERED = "1"
+  PORT = "10000"
+
+[http_service]
+  internal_port = 10000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
 
 [[vm]]
   memory = "256mb"
