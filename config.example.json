@@ -1,0 +1,86 @@
+{
+  "samsara_token": "YOUR_SAMSARA_VIEWER_TOKEN_HERE",
+  "poll_interval_sec": 8.0,
+  "query_duration_ms": 30000,
+  "home_stop": {
+    "lat": 37.774929,
+    "lon": -122.419416
+  },
+  "profiles": [
+    {
+      "name": "Morning Run",
+      "window": "06:45-08:30",
+      "require_sequential": false,
+      "cooldown_seconds": 7200.0,
+      "triggers": [
+        {
+          "name": "1. Approach Alert",
+          "lat": 37.764929,
+          "lon": -122.419416,
+          "radius_meters": 200.0,
+          "min_speed_mph": 3.0,
+          "title": "Morning Bus Approaching (3-4 mins) 🚌",
+          "message": "Bus passed approach checkpoint (approx. 3-4 minutes to your stop).",
+          "priority": "default",
+          "tags": ["bus", "clock3"]
+        },
+        {
+          "name": "2. Neighborhood Entrance",
+          "lat": 37.771000,
+          "lon": -122.418000,
+          "radius_meters": 100.0,
+          "min_speed_mph": 3.0,
+          "title": "Morning Bus in Neighborhood (1-2 mins) 🚌",
+          "message": "Bus entered neighborhood (approx. 1-2 minutes away).",
+          "priority": "high",
+          "tags": ["bus", "warning"]
+        },
+        {
+          "name": "3. Street Entrance",
+          "lat": 37.774000,
+          "lon": -122.419000,
+          "radius_meters": 85.0,
+          "min_speed_mph": 3.0,
+          "title": "Morning Bus on Street - Walk Outside! 🚨",
+          "message": "Bus is turning onto your street! Time to walk outside.",
+          "priority": "urgent",
+          "tags": ["bus", "rotating_light"]
+        }
+      ]
+    },
+    {
+      "name": "Afternoon Run",
+      "window": "14:15-16:30",
+      "require_sequential": false,
+      "cooldown_seconds": 7200.0,
+      "triggers": [
+        {
+          "name": "1. Neighborhood Entrance",
+          "lat": 37.771000,
+          "lon": -122.418000,
+          "radius_meters": 100.0,
+          "min_speed_mph": 3.0,
+          "title": "Afternoon Bus in Neighborhood 🚌",
+          "message": "Bus entered neighborhood (starting drop-off loop).",
+          "priority": "default",
+          "tags": ["bus", "clock5"]
+        },
+        {
+          "name": "2. Street Entrance",
+          "lat": 37.774000,
+          "lon": -122.419000,
+          "radius_meters": 85.0,
+          "min_speed_mph": 3.0,
+          "title": "Afternoon Bus on Street - Walk Outside! 🚨",
+          "message": "Bus is turning onto your street! Time to walk outside.",
+          "priority": "urgent",
+          "tags": ["bus", "rotating_light"]
+        }
+      ]
+    }
+  ],
+  "ntfy": {
+    "topic": "your-private-ntfy-topic-here",
+    "server_url": "https://ntfy.sh"
+  }
+}

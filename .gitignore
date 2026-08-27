@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Data logs
+logs/
+*.jsonl
+*.csv
+
+# Secrets & Local Configurations
+config.json
+.env
+.env.local
+*.har
+
+# IDE / Editor
+.vscode/
+.idea/
