@@ -455,7 +455,8 @@ def load_config(config_path_or_default: str = "config.json") -> dict:
     env_json = os.getenv("CONFIG_JSON")
     if env_json and env_json.strip():
         logger.info("Loading configuration from CONFIG_JSON environment variable.")
-        return json.loads(env_json)
+        clean_json = env_json.strip().lstrip("\ufeff")
+        return json.loads(clean_json)
 
     # 2. Check config file
     target_path = os.getenv("CONFIG_PATH", config_path_or_default)
